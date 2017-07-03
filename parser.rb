@@ -18,3 +18,12 @@ begin
 rescue Parslet::ParseFailed => e
 	pp e.parse_failure_cause.ascii_tree
 end
+
+class QueryParser < Parslet::Parser
+	rule(:term) { match('[^\s]').repeat(1).as(:term) }
+	rule(:space) { match('\s').repeat(1) }
+	rule(:query) { (term >> space.maybe).repeat.as(:query) }
+	root(:query)
+end
+
+pp QueryParser.new.parse('cat in the hat')
