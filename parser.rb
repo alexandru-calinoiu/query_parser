@@ -26,4 +26,30 @@ class QueryParser < Parslet::Parser
 	root(:query)
 end
 
-pp QueryParser.new.parse('cat in the hat')
+class QueryTransformer < Parslet::Transform
+	rule(term: simple(:term)) { term.to_s }
+	rule(query: sequence(:terms)) { Query.new(terms) }
+end
+
+class Query
+	def initialize(terms)
+		@terms = terms
+	end
+
+	def to_elasticsearch
+		{
+			query: {
+				match: {
+					title: {
+						query: @terms.join(' '),
+						operator: 'or'
+					}
+				}
+			}
+		}
+	end
+end
+
+parse_tree = QueryParser.new.parse('cat in the hat')
+query = QueryTransformer.new.apply(parse_tree)
+pp query.to_elasticsearch
