@@ -20,9 +20,13 @@ rescue Parslet::ParseFailed => e
 end
 
 class QueryParser < Parslet::Parser
-	rule(:term) { match('[^\s]').repeat(1).as(:term) }
+	rule(:term) { match('[^\s"]').repeat(1).as(:term) }
+	rule(:quote) { str('"') }
 	rule(:operator) { (str('+') | str('-')).as(:operator) }
-	rule(:clause) { (operator.maybe >> term).as(:clause) }
+	rule(:phrase) do
+		(quote >> (term >> space.maybe).repeat >> quote).as(:phrase)
+	end
+	rule(:clause) { (operator.maybe >> (phrase | term)).as(:clause) }
 	rule(:space) { match('\s').repeat(1) }
 	rule(:query) { (clause >> space.maybe).repeat.as(:query) }
 	root(:query)
@@ -34,6 +38,15 @@ class Clause
 	def initialize(operator, term)
 		@operator = Operator.symbol(operator)
 		@term = term
+	end
+end
+
+class PhraseClause
+	attr_reader :operator, :phrase
+
+	def initialize(operator, phrase)
+		@operator = Operator.symbol(operator)
+		@phrase = phrase
 	end
 end
 
@@ -54,7 +67,13 @@ end
 
 class QueryTransformer < Parslet::Transform
 	rule(clause: subtree(:clause)) do
-		Clause.new(clause[:operator]&.to_s, clause[:term].to_s)
+		if clause[:term]
+			Clause.new(clause[:operator]&.to_s, clause[:term].to_s)
+		elsif clause[:phrase]
+			PhraseClause.new(clause[:operator]&.to_s, clause[:phrase].map { |p| p[:term] }.join(' '))
+		else
+			raise "Unexpected clause type: #{clause}"
+		end
 	end
 	rule(query: sequence(:clauses)) { Query.new(clauses) }
 end
@@ -62,9 +81,9 @@ end
 class Query
 	def initialize(clauses)
 		grouped = clauses.chunk { |c| c.operator }.to_h
-		@should_terms = grouped.fetch(:should, []).map(&:term)
-		@must_not_terms = grouped.fetch(:must_not, []).map(&:term)
-		@must_terms = grouped.fetch(:must, []).map(&:term)
+		@should_clauses = grouped.fetch(:should, [])
+		@must_not_clauses = grouped.fetch(:must_not, [])
+		@must_clauses = grouped.fetch(:must, [])
 	end
 
 	def to_elasticsearch
@@ -76,14 +95,25 @@ class Query
 		}
 
 		bool = query[:query][:bool]
-		bool[:should] = @should_terms.map { |t| match(t) } if @should_terms.any?
-		bool[:must] = @must_terms.map { |t| match(t) } if @must_terms.any?
-		bool[:must_not] = @must_not_terms.map { |t| match(t) } if @must_not_terms.any?
+		bool[:should] = @should_clauses.map { |clause| clause_to_query(clause) } if @should_clauses.any?
+		bool[:must] = @must_clauses.map { |t| clause_to_query(t) } if @must_clauses.any?
+		bool[:must_not] = @must_not_clauses.map { |t| clause_to_query(t) } if @must_not_clauses.any?
 
 		query
 	end
 
 	private
+
+		def clause_to_query(clause)
+			case clause
+			when Clause
+				match(clause.term)
+			when PhraseClause
+				match_phrase(clause.phrase)
+			else
+				raise "Unknown clause type: #{clause}"
+			end
+		end
 
 		def match(term)
 			{
@@ -94,8 +124,19 @@ class Query
 				}
 			}
 		end
+
+		def match_phrase(phrase)
+			{
+				match_phrase: {
+					title: {
+						query: phrase
+					}
+				}
+			}
+		end
 end
 
-parse_tree = QueryParser.new.parse('the +cat in the -hat')
+parse_tree = QueryParser.new.parse('"cat in the hat" -green +ham')
+pp parse_tree
 query = QueryTransformer.new.apply(parse_tree)
 pp query.to_elasticsearch
